@@ -1,0 +1,263 @@
+import { prisma } from '../../db.js';
+import { AppError } from '../../http/errors.js';
+import {
+  ancestorPaths,
+  assertValidPath,
+  baseName,
+  isDescendantOf,
+  replacePathPrefix,
+} from './paths.js';
+
+/**
+ * File rules for a project.
+ *
+ * Rows are flat — each carries its full path — and the tree is assembled in
+ * memory. For a project-sized tree that is one indexed query and an O(n) pass,
+ * which beats a recursive CTE, and it keeps `@@unique([projectId, path])` as
+ * the single collision guard.
+ *
+ * Prefix matching is done in JavaScript rather than SQL `LIKE`: a path may
+ * legitimately contain `%` or `_`, and those are wildcards to LIKE. Loading the
+ * project's rows and filtering here removes that whole class of bug.
+ */
+
+const FILE_FIELDS = {
+  id: true,
+  path: true,
+  isDir: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+export interface FileRecord {
+  id: string;
+  path: string;
+  isDir: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface TreeNode extends FileRecord {
+  name: string;
+  children: TreeNode[];
+}
+
+// ── Tree ────────────────────────────────────────────────────────────────────
+
+/** Directories before files, then alphabetical — the order a file explorer
+ *  shows, decided once here rather than in every client. */
+function compareNodes(a: TreeNode, b: TreeNode): number {
+  if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+  return a.name.localeCompare(b.name);
+}
+
+export function buildTree(rows: FileRecord[]): TreeNode[] {
+  const nodes = new Map<string, TreeNode>();
+
+  for (const row of rows) {
+    nodes.set(row.path, { ...row, name: baseName(row.path), children: [] });
+  }
+
+  const roots: TreeNode[] = [];
+
+  for (const node of nodes.values()) {
+    const parent = node.path.includes('/')
+      ? nodes.get(node.path.slice(0, node.path.lastIndexOf('/')))
+      : undefined;
+
+    if (parent) parent.children.push(node);
+    else roots.push(node);
+  }
+
+  for (const node of nodes.values()) node.children.sort(compareNodes);
+  roots.sort(compareNodes);
+
+  return roots;
+}
+
+export async function listTree(projectId: string): Promise<TreeNode[]> {
+  const rows = await prisma.file.findMany({
+    where: { projectId },
+    select: FILE_FIELDS,
+    orderBy: { path: 'asc' },
+  });
+
+  return buildTree(rows);
+}
+
+// ── Reads ───────────────────────────────────────────────────────────────────
+
+async function findInProject(projectId: string, fileId: string) {
+  const file = await prisma.file.findFirst({
+    where: { id: fileId, projectId },
+    select: { ...FILE_FIELDS, content: true },
+  });
+
+  // Scoped by projectId as well as id: a file id from another project must not
+  // resolve just because the caller can read *some* project.
+  if (!file) throw new AppError(404, 'FILE_NOT_FOUND', 'File not found');
+  return file;
+}
+
+export async function readFile(
+  projectId: string,
+  fileId: string,
+): Promise<FileRecord & { content: string }> {
+  const file = await findInProject(projectId, fileId);
+
+  if (file.isDir) {
+    throw new AppError(400, 'IS_DIRECTORY', 'That path is a directory, not a file');
+  }
+  return file;
+}
+
+// ── Writes ──────────────────────────────────────────────────────────────────
+
+export async function createFile(
+  projectId: string,
+  rawPath: string,
+  isDir: boolean,
+): Promise<FileRecord> {
+  const path = assertValidPath(rawPath);
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.file.findUnique({
+      where: { projectId_path: { projectId, path } },
+      select: { id: true },
+    });
+    if (existing) throw new AppError(409, 'PATH_EXISTS', 'Something already exists at that path');
+
+    /**
+     * Missing parent directories are created implicitly. The alternative —
+     * making the client walk the path and create each level — makes module
+     * 2.3's file tree much worse for no benefit.
+     */
+    for (const ancestor of ancestorPaths(path)) {
+      const row = await tx.file.findUnique({
+        where: { projectId_path: { projectId, path: ancestor } },
+        select: { isDir: true },
+      });
+
+      if (!row) {
+        await tx.file.create({ data: { projectId, path: ancestor, isDir: true } });
+      } else if (!row.isDir) {
+        throw new AppError(409, 'PARENT_NOT_DIRECTORY', `"${ancestor}" is a file, not a directory`);
+      }
+    }
+
+    return tx.file.create({ data: { projectId, path, isDir }, select: FILE_FIELDS });
+  });
+}
+
+/**
+ * Temporary scaffolding, and labelled as such deliberately.
+ *
+ * It exists so module 2.4's editor is testable before collaboration lands.
+ * From module 3.5 the editor writes through Yjs instead and stops calling this;
+ * module 4.4 then becomes the writer of `content`. The route survives for
+ * non-collaborative writes.
+ */
+export async function writeFile(
+  projectId: string,
+  fileId: string,
+  content: string,
+): Promise<FileRecord> {
+  const file = await findInProject(projectId, fileId);
+
+  if (file.isDir) {
+    throw new AppError(400, 'IS_DIRECTORY', 'Cannot write content to a directory');
+  }
+
+  return prisma.file.update({
+    where: { id: file.id },
+    data: { content },
+    select: FILE_FIELDS,
+  });
+}
+
+export async function moveFile(
+  projectId: string,
+  fileId: string,
+  rawPath: string,
+): Promise<FileRecord> {
+  const newPath = assertValidPath(rawPath);
+
+  return prisma.$transaction(async (tx) => {
+    const file = await tx.file.findFirst({
+      where: { id: fileId, projectId },
+      select: FILE_FIELDS,
+    });
+    if (!file) throw new AppError(404, 'FILE_NOT_FOUND', 'File not found');
+
+    if (file.path === newPath) return file;
+
+    // Moving a directory inside itself would orphan the whole subtree — the
+    // rows would still exist but be unreachable from any root.
+    if (file.isDir && isDescendantOf(newPath, file.path)) {
+      throw new AppError(409, 'INVALID_MOVE', 'Cannot move a directory inside itself');
+    }
+
+    const all = await tx.file.findMany({
+      where: { projectId },
+      select: { id: true, path: true, isDir: true },
+    });
+
+    const moving = file.isDir
+      ? all.filter((row) => row.id === file.id || isDescendantOf(row.path, file.path))
+      : [file];
+
+    const movingIds = new Set(moving.map((row) => row.id));
+    const targets = new Map(
+      moving.map((row) => [
+        row.id,
+        row.id === file.id ? newPath : replacePathPrefix(row.path, file.path, newPath),
+      ]),
+    );
+
+    // Collision against anything that is not itself being moved.
+    const occupied = new Set(all.filter((row) => !movingIds.has(row.id)).map((row) => row.path));
+    for (const target of targets.values()) {
+      if (occupied.has(target)) {
+        throw new AppError(409, 'PATH_EXISTS', 'Something already exists at that path');
+      }
+    }
+
+    for (const ancestor of ancestorPaths(newPath)) {
+      const row = all.find((candidate) => candidate.path === ancestor);
+      if (!row) {
+        await tx.file.create({ data: { projectId, path: ancestor, isDir: true } });
+      } else if (!row.isDir) {
+        throw new AppError(409, 'PARENT_NOT_DIRECTORY', `"${ancestor}" is a file, not a directory`);
+      }
+    }
+
+    for (const [id, path] of targets) {
+      await tx.file.update({ where: { id }, data: { path } });
+    }
+
+    return { ...file, path: newPath };
+  });
+}
+
+export async function deleteFile(projectId: string, fileId: string): Promise<number> {
+  return prisma.$transaction(async (tx) => {
+    const file = await tx.file.findFirst({
+      where: { id: fileId, projectId },
+      select: { id: true, path: true, isDir: true },
+    });
+    if (!file) throw new AppError(404, 'FILE_NOT_FOUND', 'File not found');
+
+    if (!file.isDir) {
+      await tx.file.delete({ where: { id: file.id } });
+      return 1;
+    }
+
+    const all = await tx.file.findMany({ where: { projectId }, select: { id: true, path: true } });
+    const doomed = all
+      .filter((row) => row.id === file.id || isDescendantOf(row.path, file.path))
+      .map((row) => row.id);
+
+    await tx.file.deleteMany({ where: { id: { in: doomed } } });
+    return doomed.length;
+  });
+}
