@@ -1,0 +1,11 @@
+{
+  "name": "@collab/runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BullMQ worker driving the Docker sandbox. Never touches HTTP/WS.",
+  "main": "./dist/index.js",
+  "dependencies": {
+    "@collab/shared": "*"
+  }
+}

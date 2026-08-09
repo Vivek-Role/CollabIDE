@@ -1,0 +1,11 @@
+{
+  "name": "@collab/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "React client: editor, file tree, collab provider, terminal",
+  "main": "./dist/index.js",
+  "dependencies": {
+    "@collab/shared": "*"
+  }
+}

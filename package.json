@@ -1,0 +1,25 @@
+{
+  "name": "collab-editor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Real-time collaborative code editor with a sandboxed code runner",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "tsc -b --clean",
+    "dev": "npm run dev --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
+}
