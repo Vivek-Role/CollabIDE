@@ -1,0 +1,53 @@
+# Local development infrastructure.
+#
+# Nothing here is installed on the host — Postgres and Redis exist only as
+# containers, and their data lives in named volumes (not bind mounts), which
+# sidesteps the Windows/WSL file-permission problems entirely.
+#
+# Images are pinned to a major version on purpose: rebuilding this stack in six
+# months should produce the same thing it produces today.
+
+name: collab-editor
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: collab-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-collab}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-collab_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-collab_editor}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # "up" must mean "accepting connections", not "process started" —
+      # module 0.4's migration depends on this being honest.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-collab} -d ${POSTGRES_DB:-collab_editor}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: collab-redis
+    restart: unless-stopped
+    # appendonly keeps queue state across restarts during development.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  pgdata:
+  redisdata:
