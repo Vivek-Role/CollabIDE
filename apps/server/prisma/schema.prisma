@@ -1,0 +1,136 @@
+// Prisma lives in apps/server ONLY.
+//
+// apps/runner must never import this client — it reads plain file text that
+// module 4.4 materializes into File.content, so the sandbox worker stays
+// completely independent of the database layer.
+//
+// Prisma 7 note: the connection URL is NOT declared here. It lives in
+// prisma.config.ts for migrate/introspect, and is supplied to PrismaClient at
+// runtime via a driver adapter (module 1.1b).
+//
+// Module 1.1 adds the whole data model in one migration — including DocUpdate
+// and DocSnapshot, which stay empty until Phase 4. One reviewable change beats
+// a schema smeared across four phases.
+
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// --- Identity ---------------------------------------------------------------
+
+/// No global role field: every permission in this system is per-project and
+/// lives on ProjectMember.
+model User {
+  id           String   @id @default(cuid())
+  /// Always stored lowercased (module 1.2 normalizes on write), so this plain
+  /// unique index is enough — no citext extension, and no pair of accounts
+  /// that differ only by case.
+  email        String   @unique
+  /// scrypt, encoded as scrypt$N$r$p$salt$hash. Never leaves the server.
+  passwordHash String
+  displayName  String
+  createdAt    DateTime @default(now())
+
+  ownedProjects Project[]
+  memberships   ProjectMember[]
+}
+
+// --- Projects ---------------------------------------------------------------
+
+model Project {
+  id   String @id @default(cuid())
+  name String
+
+  /// Denormalized convenience for listings. The OWNER row in ProjectMember
+  /// stays the source of truth for authorization — assertProjectAccess (1.3)
+  /// never reads this field.
+  ///
+  /// Restrict, not Cascade: deleting a user must not silently destroy projects
+  /// their collaborators are still working in.
+  ownerId String
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members ProjectMember[]
+  files   File[]
+
+  @@index([ownerId])
+}
+
+enum Role {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+/// The join table assertProjectAccess (1.3) hits on every request — REST and
+/// WebSocket alike. Privilege ordering lives in TypeScript (ROLE_RANK), not in
+/// SQL, so adding a role later is one map entry.
+model ProjectMember {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  role      Role
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+}
+
+// --- Files ------------------------------------------------------------------
+
+model File {
+  id        String  @id @default(cuid())
+  projectId String
+  /// Full POSIX path from the project root, no leading slash (e.g. src/main.py).
+  /// Validated and normalized by modules/files/paths.ts in 1.5.
+  path      String
+  /// REST-owned scaffolding in Phase 2; module 4.4 takes over as the writer,
+  /// materializing Yjs text here so the runner never loads a CRDT.
+  content   String  @default("")
+  isDir     Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  /// The single collision guard for module 1.5.
+  @@unique([projectId, path])
+}
+
+// --- Yjs persistence (Phase 4 — created now, written later) ------------------
+
+/// Append-only update log. docId is "${projectId}:${fileId}" (docs/PLAN.md:212)
+/// rather than a foreign key, so Phase 4 cleans these up explicitly.
+model DocUpdate {
+  /// BigInt on purpose: this log grows per update batch and would overflow Int
+  /// on a busy document. Changing a primary key type after data exists is
+  /// genuinely painful.
+  id        BigInt   @id @default(autoincrement())
+  docId     String
+  update    Bytes
+  createdAt DateTime @default(now())
+
+  /// Load path: latest snapshot, then every update with a greater id.
+  @@index([docId, id])
+}
+
+model DocSnapshot {
+  id String @id @default(cuid())
+  /// One snapshot per document; compaction (4.4) replaces it in place.
+  docId     String   @unique
+  snapshot  Bytes
+  /// Highest DocUpdate.id folded into this snapshot.
+  updateId  BigInt
+  createdAt DateTime @default(now())
+}
