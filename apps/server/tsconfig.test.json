@@ -1,0 +1,14 @@
+{
+  // tsc -b builds src/ into dist/ and deliberately ignores test/. This config
+  // exists so the test code is still typechecked — `npm run typecheck:test`.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    // No vitest globals: every test imports describe/it/expect explicitly.
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "test/**/*", "vitest.config.ts"]
+}
