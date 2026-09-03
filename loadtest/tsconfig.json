@@ -1,0 +1,23 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    /**
+     * This workspace deliberately sits OUTSIDE the root `tsc -b` project graph,
+     * for the same reason apps/web does: tsconfig.base.json turns on `composite`
+     * + `declaration` so shared/server/runner can reference each other and emit
+     * .d.ts files, and a tool that is run through `tsx` and consumed by nothing
+     * wants neither. It is checked by its own `typecheck` script, which the root
+     * script calls — code that `tsc -b` does not compile is code nobody
+     * typechecks.
+     */
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+
+    /** Same reason apps/runner says so: this package has no @types dependency
+     *  that would pull Node's ambient types in for it. */
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

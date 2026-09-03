@@ -5,7 +5,16 @@
   "type": "module",
   "description": "BullMQ worker driving the Docker sandbox. Never touches HTTP/WS.",
   "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
   "dependencies": {
-    "@collab/shared": "*"
+    "@collab/shared": "*",
+    "bullmq": "^6.1.1",
+    "ioredis": "^6.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.12"
   }
 }

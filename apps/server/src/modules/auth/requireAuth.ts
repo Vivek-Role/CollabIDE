@@ -1,8 +1,8 @@
 import type { NextFunction, Request, Response } from 'express';
 
-import { prisma } from '../../db.js';
 import { AppError } from '../../http/errors.js';
-import { SESSION_COOKIE, verifyToken } from './token.js';
+import { authenticateToken, type AuthedUser } from './authenticate.js';
+import { SESSION_COOKIE } from './token.js';
 
 /**
  * Authentication only — *who* you are, never *what you may touch*.
@@ -11,15 +11,15 @@ import { SESSION_COOKIE, verifyToken } from './token.js';
  * two apart is what lets the WebSocket layer in 3.4 reuse 1.3 on its own,
  * without dragging an Express request through it.
  *
+ * The work of turning a token into a user lives in authenticate.ts, because the
+ * WebSocket upgrade in 3.2 needs the same thing without a Request. This file is
+ * the Express adapter over it.
+ *
  * Every failure is the same 401. Distinguishing "no cookie" from "expired" from
  * "tampered" would tell an attacker which of those they achieved.
  */
 
-export interface AuthedUser {
-  id: string;
-  email: string;
-  displayName: string;
-}
+export type { AuthedUser };
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -40,25 +40,12 @@ export async function requireAuth(
 ): Promise<void> {
   const token: unknown = req.cookies?.[SESSION_COOKIE];
 
-  if (typeof token !== 'string' || token.length === 0) {
+  if (typeof token !== 'string') {
     next(UNAUTHENTICATED());
     return;
   }
 
-  let userId: string;
-  try {
-    ({ userId } = await verifyToken(token));
-  } catch {
-    next(UNAUTHENTICATED());
-    return;
-  }
-
-  // The token is only a claim. The user may have been deleted since it was
-  // issued, so the row is the authority.
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { id: true, email: true, displayName: true },
-  });
+  const user = await authenticateToken(token);
 
   if (!user) {
     next(UNAUTHENTICATED());

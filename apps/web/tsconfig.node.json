@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    /**
+     * vite.config.ts lives outside src/, so the app config above never sees it.
+     * Without this file the one piece of configuration that can break the whole
+     * dev server — the API proxy — would be the only unchecked file in the
+     * workspace.
+     */
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts"]
+}

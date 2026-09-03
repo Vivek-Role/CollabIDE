@@ -1,0 +1,132 @@
+@import 'tailwindcss';
+
+/**
+ * Tailwind v4 has no tailwind.config.js and no PostCSS chain — the plugin in
+ * vite.config.ts plus this import is the whole setup. If a tailwind.config.js
+ * or postcss.config.js ever appears in this repo, it came from v3 guidance and
+ * is wrong.
+ *
+ * @theme declares design tokens and generates utilities from them, so
+ * --color-panel below is usable as bg-panel / text-panel / border-panel.
+ * One place to change the palette; module 2.4's CodeMirror theme reads the
+ * same tokens rather than inventing a second set.
+ *
+ * Module 10.1 EXTENDED this block and renamed nothing. That rule is not
+ * stylistic: Tailwind generates utility names from token names, so renaming
+ * --color-panel would break every bg-panel in the app at once. Additions only.
+ *
+ * Phase 10 decision A7: one dark theme. The tokens are kept additive so a light
+ * theme remains possible later; it is deliberately NOT implemented, and there
+ * are no prefers-color-scheme blocks anywhere in this file.
+ */
+@theme {
+  /* ── original palette (Phase 2) — do not rename ─────────────────────── */
+  --color-surface: #0d1117;
+  --color-panel: #161b22;
+  --color-elevated: #1f2630;
+  --color-line: #2d333b;
+  --color-ink: #e6edf3;
+  --color-muted: #8b949e;
+  --color-accent: #4493f8;
+  --color-danger: #f85149;
+
+  /* ── module 10.1 additions ──────────────────────────────────────────── */
+
+  /* One step above --color-elevated, for rows and cards that react to hover.
+     Before this, a hovered row and a selected row were the same colour. */
+  --color-elevated-hover: #262d38;
+
+  /* A border that has to read against --color-panel rather than --color-surface. */
+  --color-line-strong: #3d444d;
+
+  /* The focus ring. The client had ZERO focus-visible styles before 10.1 —
+     inputs stripped the native outline with outline-none and replaced it with a
+     1px border change, and buttons had nothing at all. Deliberately lighter
+     than --color-accent so a ring on a primary button stays visible. */
+  --color-focus: #58a6ff;
+
+  /* Connection and run state. Used by Badge; module 10.4 puts them on the
+     editor status bar and 10.5 on the run panel. */
+  --color-success: #3fb950;
+  --color-warn: #d29922;
+
+  /* Primary buttons had no hover state at all. */
+  --color-accent-hover: #58a6ff;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+
+  --shadow-panel: 0 8px 24px rgb(1 4 9 / 0.6);
+
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Menlo, monospace;
+}
+
+/**
+ * The type scale — a convention, not tokens.
+ *
+ * Tailwind already ships text-xs…text-2xl; the problem this phase fixes is
+ * USAGE, not availability. Before 10.1 the client used text-xs 94 times and
+ * text-[10px] 9 times, and nothing larger than text-lg existed outside the auth
+ * pages — so every screen was flat. Use this ladder rather than reaching for
+ * text-xs by reflex:
+ *
+ *   text-[11px]  metadata, status bar          (replaces every text-[10px])
+ *   text-xs      dense UI: tree, tabs, badges
+ *   text-[13px]  body default, form inputs
+ *   text-sm      card titles, dialog titles, labels
+ *   text-base    page headings
+ *   text-xl      auth page headings
+ */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/**
+ * Dialog entry (module 10.1). Written as plain CSS rather than an arbitrary
+ * animate-[…] utility so the keyframes are defined once, next to the class that
+ * uses them, and cannot be tree-shaken away from a dynamic class string.
+ */
+@keyframes dialog-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.dialog-backdrop-in {
+  animation: dialog-backdrop-in 120ms ease-out;
+}
+
+.dialog-panel-in {
+  animation: dialog-panel-in 120ms ease-out;
+}
+
+/* Respect the user's motion preference — the animation is decoration. */
+@media (prefers-reduced-motion: reduce) {
+  .dialog-backdrop-in,
+  .dialog-panel-in {
+    animation: none;
+  }
+}

@@ -1,0 +1,86 @@
+%% System architecture — collab-editor
+%%
+%% Purpose: what the running system is made of, and which process talks to what.
+%%
+%% Verified 2026-09-03 against:
+%%   apps/server/src/{app.ts,index.ts}, modules/{auth,projects,files,collab,persistence,execution,redis}
+%%   apps/runner/src/{index.ts,worker.ts,redis.ts,config.ts}, sandbox/{docker,limits,reaper}.ts
+%%   packages/shared/src/{protocol.ts,languages.ts}
+%%   apps/web/vite.config.ts, infra/docker-compose.yml, infra/images/*
+%%
+%% Two boundaries this diagram exists to make visible:
+%%   1. apps/server has NO edge to Docker. It imports no Docker anything.
+%%   2. apps/runner has NO edge to PostgreSQL. It imports no Prisma, no Yjs, no Express.
+%%   They share only @collab/shared (compile-time), the BullMQ queue, and Redis channels.
+
+flowchart LR
+  subgraph browser["Browser"]
+    Web["apps/web — @collab/web<br/>React · Vite · CodeMirror 6<br/>y-indexeddb · xterm.js"]
+  end
+
+  Shared["packages/shared — @collab/shared<br/>protocol.ts · languages.ts<br/>zero dependencies"]
+
+  subgraph srv["apps/server — @collab/server, port 4000 — never touches Docker"]
+    REST["REST routers<br/>auth · projects · files · execution"]
+    WS["/ws collaboration hub<br/>cookie-authenticated upgrade"]
+    Rooms["room registry<br/>one Y.Doc + Awareness per open file"]
+    Persist["persistence<br/>buffer · DocStore · compactor · materialize"]
+    Bus["docBus<br/>lazy publisher + lazy subscriber"]
+    Reg["run registry — in memory<br/>one Redis subscriber per run"]
+    QProd["BullMQ Queue producer — lazy"]
+    SSE["SSE /runs/:jobId/stream"]
+  end
+
+  Srv2["apps/server — second instance, port 4001<br/>same code, its own Y.Docs and its own flush cycle"]
+
+  subgraph runner["apps/runner — @collab/runner — sole owner of the Docker socket"]
+    Wrk["BullMQ Worker<br/>concurrency 2 · attempts 1"]
+    Lim["runWithLimits<br/>10 s wall clock · 1 MB output"]
+    Drv["runInContainer<br/>docker create then cp then start -a"]
+    Reap["reaper<br/>label ce.run, older than 60 s"]
+  end
+
+  PG[("PostgreSQL 16<br/>User · Project · ProjectMember · File<br/>DocUpdate · DocSnapshot")]
+
+  subgraph rds["Redis 7 — three uses, six connection roles, never shared"]
+    Queue["BullMQ queue 'exec'"]
+    DocCh["Pub/Sub channel doc:projectId:fileId"]
+    RunCh["Pub/Sub channel run:jobId"]
+  end
+
+  Docker["Docker daemon"]
+  Cont["sandbox container<br/>network none · user 1000:1000 · 256 MB · 0.5 CPU<br/>64 pids · read-only rootfs · tmpfs /tmp · volume /work"]
+
+  LT["loadtest — @collab/loadtest<br/>headless Yjs clients, development only"]
+
+  Web -->|"HTTP + ce_session cookie<br/>Vite proxies /api and /ws in dev"| REST
+  Web <-->|"binary Yjs frames"| WS
+  SSE -->|"text/event-stream"| Web
+
+  WS --- Rooms
+  Rooms --- Persist
+  Rooms --- Bus
+  REST -->|"Prisma — imported only here"| PG
+  Persist -->|"DocUpdate rows · DocSnapshot · File.content"| PG
+
+  Bus <-->|"PUBLISH / SUBSCRIBE"| DocCh
+  DocCh <--> Srv2
+  Srv2 -->|"its own append + flush"| PG
+
+  REST --> QProd
+  QProd -->|"queue.add, attempts 1"| Queue
+  Queue -->|"job"| Wrk
+  Wrk --> Lim --> Drv
+  Drv -->|"docker CLI — argv array, never a shell"| Docker
+  Docker --> Cont
+  Reap -->|"docker rm -fv"| Docker
+
+  Wrk -->|"PUBLISH stdout / stderr / exit"| RunCh
+  RunCh -->|"one subscriber per run"| Reg
+  Reg --> SSE
+
+  Shared -.->|"compile-time types only"| browser
+  Shared -.->|"compile-time types only"| srv
+  Shared -.->|"compile-time types only"| runner
+
+  LT -.->|"WebSocket + REST, dev only"| WS

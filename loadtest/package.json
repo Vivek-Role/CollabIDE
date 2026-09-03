@@ -1,0 +1,25 @@
+{
+  "name": "@collab/loadtest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless Yjs load-test harness. Imported by no app; imports no app.",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@collab/shared": "*",
+    "ioredis": "^6.0.0",
+    "lib0": "^0.2.117",
+    "pg": "^8.23.0",
+    "ws": "^8.21.3",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.32"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.21.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.11"
+  }
+}

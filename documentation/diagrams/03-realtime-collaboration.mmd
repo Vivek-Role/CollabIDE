@@ -1,0 +1,87 @@
+%% Real-time collaboration — two clients on two server instances, one document
+%%
+%% Purpose: the whole path a keystroke takes — join and authorization, the Yjs
+%% sync handshake, local fan-out, the Redis doc bus, and persistence on both
+%% instances.
+%%
+%% Verified 2026-09-03 against:
+%%   apps/server/src/modules/collab/{wsServer.ts,room.ts,syncHandler.ts}
+%%   apps/server/src/modules/redis/docBus.ts
+%%   apps/server/src/modules/persistence/{buffer.ts,compactor.ts,materialize.ts,DocStore.ts}
+%%   apps/server/src/modules/auth/authorize.ts
+%%   apps/web/src/features/collab/CollabProvider.ts
+%%
+%% Yjs does the merging. Everything drawn here is transport, authorization,
+%% fan-out and storage — the parts this project built around the library.
+
+sequenceDiagram
+  autonumber
+  participant A as Browser A
+  participant S1 as Server 1
+  participant PG as PostgreSQL
+  participant R as Redis Pub/Sub
+  participant S2 as Server 2
+  participant B as Browser B
+
+  Note over A,B: Both open the same file. docId is projectId:fileId
+
+  rect rgb(240, 244, 248)
+  Note over A,PG: Join — authorize BEFORE the socket is attached to any room
+  A->>S1: WS upgrade /ws?doc=projectId:fileId, ce_session cookie
+  S1->>S1: check Origin, verify the JWT, validate the docId SHAPE only
+  S1->>PG: assertProjectAccess(userId, projectId, VIEWER)
+  PG-->>S1: membership row, or none
+  Note over S1: no membership closes 4404, never 4403 —<br/>project existence stays private.<br/>canWrite = role is EDITOR or OWNER
+  S1->>PG: DocStore.load(docId) — snapshot, then every DocUpdate above it
+  PG-->>S1: bytes
+  S1->>S1: build the room: Y.Doc + Awareness,<br/>then attachPersistence LAST
+  end
+
+  rect rgb(244, 240, 248)
+  Note over A,S1: Yjs sync handshake (y-protocols)
+  S1-->>A: sync step 1 — the server's state vector
+  A->>S1: sync step 1 + sync step 2 — including anything typed offline
+  S1-->>A: sync step 2 — exactly what A lacks
+  A->>S1: awareness update, state is {user: {name, color}}
+  end
+
+  Note over B,S2: Browser B performs the same handshake against Server 2
+
+  rect rgb(240, 248, 242)
+  Note over A,B: An edit propagates
+  A->>S1: Yjs update, binary frame, type byte 0
+  Note over S1: a VIEWER's frame is DROPPED here unless it is sync step 1
+  S1->>S1: Y.applyUpdate — origin is A's connection
+  S1->>S1: broadcast to local peers, skipping A
+  Note over S1,R: local fan-out FIRST, publish second —<br/>a local peer's latency must not depend on Redis
+  S1->>R: PUBLISH doc:projectId:fileId<br/>[instanceId + kind + payload]
+  R->>S2: frame
+  S2->>S2: our own instanceId? drop.<br/>otherwise Y.applyUpdate with BUS_ORIGIN
+  S2-->>B: fans out through the SAME observer
+  Note over S2: BUS_ORIGIN is never re-published — that is the echo guard.<br/>Awareness travels the same channel with kind 1
+  end
+
+  rect rgb(250, 246, 236)
+  Note over S1,PG: Persistence runs on BOTH instances, independently
+  S1->>S1: ydoc.on('update') to the write buffer
+  S2->>S2: ydoc.on('update') to its own write buffer
+  S1->>PG: after 2 s, or 64 KB, whichever first:<br/>ONE merged DocUpdate row
+  S1->>PG: then materialize File.content — derived, single writer, never before the append
+  S2->>PG: its own merged row for the same document
+  Note over PG: more rows is the RIGHT answer here —<br/>write amplification, not corruption
+  opt log longer than 200 rows
+    S1->>PG: readForCompaction, ignoring rows younger than 30 s
+    S1->>PG: compact() — compare-and-set on DocSnapshot.updateId,<br/>then delete the folded rows, in ONE transaction
+    Note over S1,PG: the fold is built from the LOG, never from this instance's Y.Doc
+  end
+  end
+
+  rect rgb(250, 240, 240)
+  Note over A,S1: Failure and revocation paths
+  A--xS1: socket drops
+  S1->>S1: remove A's awareness ids, then leaveRoom
+  Note over S1: last connection out: unsubscribe from the bus synchronously,<br/>THEN force a final flush, then destroy the Y.Doc
+  A->>A: keeps editing against y-indexeddb, status "Reconnecting…"
+  A->>S1: reconnects after random(0, min(15 s, 500 ms · 2^attempt)),<br/>and sync step 1 carries everything missed — there is no outbox
+  Note over S1,A: role change, removal or delete closes the socket 4409,<br/>which the client treats as terminal and never retries
+  end

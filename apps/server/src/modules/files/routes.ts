@@ -2,7 +2,7 @@ import { Router } from 'express';
 
 import { routeParam } from '../../http/params.js';
 import { requireAuth, requireProjectRole } from '../auth/index.js';
-import { createFileSchema, moveFileSchema, writeFileSchema } from './schemas.js';
+import { createFileSchema, moveFileSchema } from './schemas.js';
 import * as service from './service.js';
 
 /**
@@ -36,16 +36,9 @@ filesRouter.post('/', requireProjectRole('EDITOR'), async (req, res) => {
   res.status(201).json({ file });
 });
 
-filesRouter.put('/:fileId', requireProjectRole('EDITOR'), async (req, res) => {
-  const { content } = writeFileSchema.parse(req.body);
-  const file = await service.writeFile(
-    routeParam(req, 'projectId'),
-    routeParam(req, 'fileId'),
-    content,
-  );
-
-  res.json({ file });
-});
+// There is no PUT: file content is written through the collaboration socket and
+// materialized by modules/persistence (4.4). A REST write would be silently
+// overwritten by the next flush.
 
 filesRouter.patch('/:fileId', requireProjectRole('EDITOR'), async (req, res) => {
   const { path } = moveFileSchema.parse(req.body);

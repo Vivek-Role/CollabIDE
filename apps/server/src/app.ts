@@ -5,6 +5,7 @@ import { prisma } from './db.js';
 import { errorHandler, notFoundHandler } from './http/errors.js';
 import { originCheck } from './http/originCheck.js';
 import { authRouter } from './modules/auth/index.js';
+import { executionRouter } from './modules/execution/index.js';
 import { filesRouter } from './modules/files/index.js';
 import { projectsRouter } from './modules/projects/index.js';
 
@@ -40,6 +41,10 @@ export function buildApp(): Express {
   app.use('/api/auth', authRouter);
   // Files mount first: the more specific path must win before /:id is tried.
   app.use('/api/projects/:projectId/files', filesRouter);
+  // Execution (6.6) for the same reason: /run and /runs/:jobId/stream must be
+  // matched before projectsRouter's /:id. Importing it connects to nothing —
+  // its queue is created lazily on the first real run.
+  app.use('/api/projects/:projectId', executionRouter);
   app.use('/api/projects', projectsRouter);
 
   app.use(notFoundHandler);

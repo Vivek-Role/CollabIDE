@@ -39,6 +39,27 @@ const EnvSchema = z.object({
    * belt to that proxy's braces.
    */
   WEB_ORIGIN: z.string().min(1).default('http://localhost:5173'),
+  /**
+   * Where the execution queue and the run-output channels live (module 6.6).
+   *
+   * Defaulted rather than required on purpose: the test harness never sets it,
+   * and buildApp() must keep booting without Redis. Nothing connects at import
+   * time — modules/execution creates its queue lazily, on the first real run.
+   */
+  REDIS_URL: z.string().min(1).default('redis://localhost:6379'),
+  /**
+   * Whether the collaboration fan-out also goes over Redis (module 7.1).
+   *
+   * Defaults to on everywhere except tests. The suite drives real rooms through
+   * real sockets (collab.test.ts) and runs today with Redis down; subscribing
+   * from those tests would open connections that are not there and leave handles
+   * that can stop Vitest exiting. modules/redis is NOT gated by this — only the
+   * two call sites in collab/syncHandler.ts are, so docBus.test.ts still
+   * exercises the real bus.
+   *
+   * It controls nothing else. It is not a feature switch.
+   */
+  DOC_BUS_ENABLED: z.enum(['true', 'false']).optional(),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
@@ -60,6 +81,11 @@ export const config = Object.freeze({
   databaseUrl: parsed.data.DATABASE_URL,
   jwtSecret: parsed.data.JWT_SECRET,
   webOrigin: parsed.data.WEB_ORIGIN,
+  redisUrl: parsed.data.REDIS_URL,
+  docBusEnabled:
+    parsed.data.DOC_BUS_ENABLED === undefined
+      ? parsed.data.NODE_ENV !== 'test'
+      : parsed.data.DOC_BUS_ENABLED === 'true',
   isProduction: parsed.data.NODE_ENV === 'production',
 });
 

@@ -1,0 +1,85 @@
+%% Run lifecycle — the states a run actually has
+%%
+%% Purpose: the real terminal outcomes of a run, and the flags that are NOT
+%% states.
+%%
+%% Verified 2026-09-03 against:
+%%   packages/shared/src/languages.ts   — RunStatus is exactly {ok, timeout, error}
+%%   apps/runner/src/sandbox/limits.ts  — the only place a RunStatus is decided
+%%   apps/runner/src/worker.ts          — one exit frame, from a finally
+%%   apps/server/src/modules/execution/{service.ts,registry.ts,stream.ts}
+%%   apps/web/src/features/terminal/useRun.ts
+%%
+%% States that were considered and DO NOT EXIST in this system:
+%%   "Killed"    — killing is a mechanism, not an outcome. A kill for the output
+%%                 cap reports Ok with truncated=true; a kill for the timeout
+%%                 reports Timeout. There is no third answer.
+%%   "Cancelled" — there is no cancellation path anywhere.
+%%   "Retrying"  — attempts is 1. Nothing retries, on either side.
+%%   BullMQ's own completed/failed job states exist but nothing reads them; the
+%%   worker deliberately completes even for a failed run.
+
+stateDiagram-v2
+  [*] --> Requested : POST /api/projects/:id/run
+
+  Requested --> Rejected : validation, authorization or cap failure
+  Requested --> Queued : registry.open and queue.add both succeeded, 202 {jobId}
+
+  Queued --> Running : the worker takes the job, concurrency 2
+
+  Running --> Ok : the container exited on its own
+  Running --> Timeout : 10 s wall clock reached, container killed
+  Running --> Error : the sandbox could not carry the run out
+
+  Rejected --> [*]
+  Ok --> [*]
+  Timeout --> [*]
+  Error --> [*]
+
+  note right of Rejected
+    No job is created and nothing is published.
+    HTTP 400 LANGUAGE_UNSUPPORTED, 403 FORBIDDEN,
+    404 PROJECT_NOT_FOUND or FILE_NOT_FOUND,
+    413 RUN_TOO_LARGE, 429 TOO_MANY_RUNS.
+  end note
+
+  note right of Queued
+    Nothing consumes the queue if apps/runner is not
+    running. The job then stays here. The registry
+    entry expires after 120 s, but the SSE response is
+    never ended, so the terminal simply waits.
+    [read in registry.remove and stream.ts — not
+     reproduced in a browser]
+  end note
+
+  note right of Running
+    Bounded by construction: 10 s wall clock and
+    1,000,000 bytes of output, both aborting one
+    AbortController, first writer wins the reason.
+    On SIGTERM the worker waits for active jobs, so
+    the exit frame is still published. On SIGKILL it
+    is not, and the reaper removes the container.
+  end note
+
+  note right of Ok
+    RunStatus.Ok. exitCode may be non-zero — a program
+    exiting 1 ran perfectly well.
+    truncated=true means the 1 MB output cap killed it,
+    and exitCode is then null. That is still Ok,
+    never Timeout.
+    A kernel OOM also lands here, as exitCode 137.
+  end note
+
+  note right of Timeout
+    RunStatus.Timeout, exitCode null.
+    137 alone is ambiguous — a kernel OOM and our own
+    docker kill both produce it. RunResult.killed is
+    the only thing that separates them.
+  end note
+
+  note right of Error
+    RunStatus.Error: a missing image, the Docker daemon
+    down, an unknown language, an entrypoint outside the
+    file set, a path escaping /work.
+    message never carries user code or a stack trace.
+  end note

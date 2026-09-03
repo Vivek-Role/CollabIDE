@@ -9,13 +9,21 @@
   },
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "apps/*",
+    "loadtest"
   ],
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b",
+    "build:web": "npm run build -w @collab/web",
+    "typecheck": "tsc -b && npm run typecheck -w @collab/web && npm run typecheck -w @collab/loadtest",
     "clean": "tsc -b --clean",
-    "dev": "npm run dev --workspaces --if-present",
+    "dev:server": "npm run dev -w @collab/server",
+    "dev:web": "npm run dev -w @collab/web",
+    "dev:runner": "npm run dev -w @collab/runner",
+    "dev:server:b": "PORT=4001 WEB_ORIGIN=http://localhost:5174 npm run dev -w @collab/server",
+    "dev:web:b": "API_PORT=4001 npm run dev -w @collab/web -- --port 5174",
+    "loadtest": "tsx loadtest/src/main.ts",
+    "seed:demo": "tsx scripts/seed-demo.ts",
     "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {

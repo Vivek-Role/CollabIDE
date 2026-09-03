@@ -1,7 +1,11 @@
+import { makeDocId } from '@collab/shared';
 import type { Role } from '@prisma/client';
 
 import { prisma } from '../../db.js';
 import { AppError } from '../../http/errors.js';
+// Through the barrel only, and one way: collab imports nothing from here.
+import { disconnectProject, disconnectProjectUser } from '../collab/index.js';
+import { docStore } from '../persistence/index.js';
 
 /**
  * Project rules. Knows nothing about HTTP — no `req`, no `res`, no status codes
@@ -101,10 +105,21 @@ export async function renameProject(projectId: string, name: string): Promise<Pr
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
+  // Read the file ids first: the delete below cascades them away, and their doc
+  // rows key on a string docId rather than a foreign key, so nothing else would
+  // ever reach them.
+  const files = await prisma.file.findMany({ where: { projectId }, select: { id: true } });
+
   // Memberships and files go with it via onDelete: Cascade (module 1.1).
-  // DocUpdate/DocSnapshot key on a string docId rather than a foreign key, so
-  // Phase 4 will clean those up here explicitly.
   await prisma.project.delete({ where: { id: projectId } });
+
+  // Anyone with a file of this project open is holding a socket onto rows that
+  // no longer exist (module 3.4b).
+  await disconnectProject(projectId);
+
+  // Same teardown race as deleteFile, and the same reasoning: orphan rows are
+  // unreadable and bounded.
+  await Promise.all(files.map((file) => docStore.deleteDoc(makeDocId(projectId, file.id))));
 }
 
 // ── Membership ──────────────────────────────────────────────────────────────
@@ -166,6 +181,11 @@ export async function changeMemberRole(
     data: { role },
   });
 
+  // Their open sockets carry the role they joined with (module 3.4b). This runs
+  // in both directions: a promoted VIEWER is still read-only on the socket it
+  // already has, and would stay that way until it reconnected.
+  await disconnectProjectUser(projectId, userId);
+
   return {
     userId: member.user.id,
     email: member.user.email,
@@ -201,4 +221,7 @@ export async function removeMember(
   await prisma.projectMember.delete({
     where: { projectId_userId: { projectId, userId } },
   });
+
+  // Membership is gone, so any socket they still hold is gone too (module 3.4b).
+  await disconnectProjectUser(projectId, userId);
 }

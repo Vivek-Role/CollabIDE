@@ -1,5 +1,10 @@
+import { makeDocId } from '@collab/shared';
+
 import { prisma } from '../../db.js';
 import { AppError } from '../../http/errors.js';
+// Through the barrel only, and one way: collab imports nothing from here.
+import { closeFileRooms } from '../collab/index.js';
+import { docStore } from '../persistence/index.js';
 import {
   ancestorPaths,
   assertValidPath,
@@ -85,6 +90,28 @@ export async function listTree(projectId: string): Promise<TreeNode[]> {
   return buildTree(rows);
 }
 
+/**
+ * Every runnable file in the project, as plain text, for module 6.6's run
+ * payload.
+ *
+ * One query rather than listTree + readFile per file, which would be an N+1 for
+ * exactly what a single findMany returns. Directories are excluded: `docker cp`
+ * recreates the tree from the file paths.
+ *
+ * `content` is derived state written only by modules/persistence (4.4), and it
+ * can lag the update log by one flush interval — which is why the execution
+ * service flushes before calling this.
+ */
+export async function listFilesForRun(
+  projectId: string,
+): Promise<{ path: string; content: string }[]> {
+  return prisma.file.findMany({
+    where: { projectId, isDir: false },
+    select: { path: true, content: true },
+    orderBy: { path: 'asc' },
+  });
+}
+
 // ── Reads ───────────────────────────────────────────────────────────────────
 
 async function findInProject(projectId: string, fileId: string) {
@@ -146,32 +173,6 @@ export async function createFile(
     }
 
     return tx.file.create({ data: { projectId, path, isDir }, select: FILE_FIELDS });
-  });
-}
-
-/**
- * Temporary scaffolding, and labelled as such deliberately.
- *
- * It exists so module 2.4's editor is testable before collaboration lands.
- * From module 3.5 the editor writes through Yjs instead and stops calling this;
- * module 4.4 then becomes the writer of `content`. The route survives for
- * non-collaborative writes.
- */
-export async function writeFile(
-  projectId: string,
-  fileId: string,
-  content: string,
-): Promise<FileRecord> {
-  const file = await findInProject(projectId, fileId);
-
-  if (file.isDir) {
-    throw new AppError(400, 'IS_DIRECTORY', 'Cannot write content to a directory');
-  }
-
-  return prisma.file.update({
-    where: { id: file.id },
-    data: { content },
-    select: FILE_FIELDS,
   });
 }
 
@@ -240,7 +241,7 @@ export async function moveFile(
 }
 
 export async function deleteFile(projectId: string, fileId: string): Promise<number> {
-  return prisma.$transaction(async (tx) => {
+  const deleted = await prisma.$transaction(async (tx) => {
     const file = await tx.file.findFirst({
       where: { id: fileId, projectId },
       select: { id: true, path: true, isDir: true },
@@ -249,7 +250,7 @@ export async function deleteFile(projectId: string, fileId: string): Promise<num
 
     if (!file.isDir) {
       await tx.file.delete({ where: { id: file.id } });
-      return 1;
+      return [file.id];
     }
 
     const all = await tx.file.findMany({ where: { projectId }, select: { id: true, path: true } });
@@ -258,6 +259,23 @@ export async function deleteFile(projectId: string, fileId: string): Promise<num
       .map((row) => row.id);
 
     await tx.file.deleteMany({ where: { id: { in: doomed } } });
-    return doomed.length;
+    return doomed;
   });
+
+  // Anyone editing one of these is holding a socket onto a row that is gone —
+  // for a directory, that is every descendant too (module 3.4b). The ids are
+  // collected inside the transaction because afterwards there is nothing to walk.
+  await closeFileRooms(deleted);
+
+  // DocUpdate/DocSnapshot key on a string docId, not a foreign key, so the
+  // cascade does not reach them.
+  //
+  // Known limitation: closing a socket runs its room teardown asynchronously, so
+  // a final flush can land just after this and leave orphan rows. They are
+  // unreadable — the File row is gone, so createRoom returns null — and bounded
+  // by "a socket was open at the moment of deletion". Fixing it properly means
+  // making revocation awaitable, which is its own module.
+  await Promise.all(deleted.map((id) => docStore.deleteDoc(makeDocId(projectId, id))));
+
+  return deleted.length;
 }

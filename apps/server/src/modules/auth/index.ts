@@ -13,8 +13,9 @@ export {
   requireProjectRole,
   type ProjectAccess,
 } from './authorize.js';
+export { authenticateToken, type AuthedUser } from './authenticate.js';
 export { hashPassword, verifyPassword } from './password.js';
-export { currentUser, requireAuth, type AuthedUser } from './requireAuth.js';
+export { currentUser, requireAuth } from './requireAuth.js';
 export { authRouter } from './routes.js';
 export {
   SESSION_COOKIE,

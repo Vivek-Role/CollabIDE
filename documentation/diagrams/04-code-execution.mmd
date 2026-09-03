@@ -1,0 +1,83 @@
+%% Code execution — Client to API to BullMQ to Worker to Docker to Client
+%%
+%% Purpose: the full request/response path of one run, including the two
+%% orderings that are load-bearing (subscribe before enqueue; buffered replay
+%% when the stream attaches late).
+%%
+%% Verified 2026-09-03 against:
+%%   apps/server/src/modules/execution/{routes.ts,service.ts,registry.ts,stream.ts,queue.ts,schemas.ts}
+%%   apps/runner/src/worker.ts, sandbox/{docker.ts,limits.ts,reaper.ts}
+%%   packages/shared/src/languages.ts
+%%   apps/web/src/features/terminal/useRun.ts
+%%
+%% Run output is Server-Sent Events, never the collaboration WebSocket: that
+%% socket is per-document and a run is per-project.
+
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant API as apps/server — REST
+  participant REG as run registry — in memory
+  participant R as Redis
+  participant W as apps/runner — BullMQ worker
+  participant D as Docker daemon
+  participant C as sandbox container
+
+  rect rgb(240, 244, 248)
+  Note over B,R: Accepting the run
+  B->>API: POST /api/projects/:id/run {entrypoint}
+  API->>API: requireAuth, then requireProjectRole(EDITOR)
+  API->>API: languageForPath(entrypoint) — resolved from the EXTENSION,<br/>never sent by the client
+  API->>API: flushAllRooms() so File.content is current
+  API->>API: listFilesForRun(projectId) — plain text, no CRDT
+  API->>API: cap: at most 100 files and 1,000,000 bytes
+  API->>REG: open(jobId, projectId, userId) — max 20 active
+  REG->>R: SUBSCRIBE run:jobId
+  Note over REG,R: SUBSCRIBE BEFORE enqueue. Pub/Sub is at-most-once and a small<br/>program finishes in roughly 300 ms — the same order as this round trip
+  API->>R: queue.add('run', job) — attempts 1, no retry anywhere
+  API-->>B: 202 {jobId}
+  end
+
+  rect rgb(244, 240, 248)
+  Note over B,REG: Attaching the output stream
+  B->>API: GET /api/projects/:id/runs/:jobId/stream
+  API->>API: re-authorize EDITOR, and require entry.projectId === projectId
+  Note over API: a jobId is not a capability; a mismatch is 404, same as unknown
+  API->>REG: attach(sink)
+  REG-->>B: replays every frame buffered since SUBSCRIBE, in order
+  end
+
+  rect rgb(240, 248, 242)
+  Note over R,C: Execution
+  R->>W: job from queue 'exec' — worker concurrency 2
+  W->>D: docker create — network none, 256 MB, 0.5 CPU, 64 pids,<br/>read-only rootfs, cap-drop ALL, user 1000:1000, volume /work
+  W->>D: docker cp stagingDir/. container:/work
+  Note over W,D: /work MUST be a volume — a read-only rootfs refuses docker cp outright
+  W->>D: docker start -a — no stdin attached, no TTY
+  D->>C: process starts as uid 1000, with no network
+  loop while the program runs
+    C-->>D: stdout / stderr
+    D-->>W: chunk
+    W->>R: PUBLISH run:jobId {type: stdout | stderr}
+    R->>REG: frame
+    REG-->>B: SSE data:
+  end
+  end
+
+  rect rgb(250, 240, 240)
+  Note over W,C: Ending, exactly once
+  alt the program exits on its own
+    C-->>D: exit code
+  else 10 s wall clock, or 1,000,000 bytes of output
+    W->>D: docker kill — first limit to fire wins the reason
+  end
+  W->>D: docker rm -fv — in a finally, on every path
+  W->>R: PUBLISH exactly ONE exit frame<br/>{status, exitCode, durationMs, truncated}
+  Note over W: the worker never throws for an execution result;<br/>the frame is the only execution-result channel
+  R->>REG: exit frame
+  REG->>REG: release the subscriber; drop the entry once a client has drained it
+  REG-->>B: SSE exit frame, then res.end()
+  B->>B: EventSource.close() — suppresses its own auto-reconnect
+  end
+
+  Note over W,D: separately, every 60 s and at boot: the reaper removes<br/>ce.run-labelled containers older than 60 s with docker rm -fv

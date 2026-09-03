@@ -3,7 +3,6 @@
   "references": [
     { "path": "./packages/shared" },
     { "path": "./apps/server" },
-    { "path": "./apps/runner" },
-    { "path": "./apps/web" }
+    { "path": "./apps/runner" }
   ]
 }

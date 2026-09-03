@@ -2,7 +2,12 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // The runner drives the docker CLI through node: built-ins, so it needs
+    // Node's ambient types. apps/server gets them for free because @types/express
+    // and friends pull them in; this package has no such dependency, so it says
+    // so explicitly. @types/node itself is a root devDependency already.
+    "types": ["node"]
   },
   "include": ["src/**/*"],
   "references": [{ "path": "../../packages/shared" }]

@@ -1,10 +1,31 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+    /**
+     * This workspace deliberately sits OUTSIDE the root `tsc -b` project graph.
+     *
+     * tsconfig.base.json turns on `composite` + `declaration`, which exist so
+     * server/runner/shared can reference each other and emit .d.ts files. A Vite
+     * app needs the opposite: bundler resolution, JSX, and no emit at all —
+     * Vite does the building. Rather than contort the whole graph around one
+     * browser app, web is removed from the root references and checked by its
+     * own `typecheck` script, which the root script calls.
+     *
+     * Same shape as apps/server's tsconfig.test.json, and for the same reason:
+     * code that `tsc -b` does not compile is code nobody typechecks.
+     */
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    /** vite/client declares the asset modules Vite handles — without it the
+     *  `import './index.css'` in main.tsx has no type and fails TS2882. */
+    "types": ["vite/client"]
   },
-  "include": ["src/**/*"],
-  "references": [{ "path": "../../packages/shared" }]
+  "include": ["src"]
 }
